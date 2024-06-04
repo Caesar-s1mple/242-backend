@@ -1,4 +1,3 @@
-import asyncio
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -9,12 +8,11 @@ import time
 import torch
 import uvicorn
 from fastapi import FastAPI, status, BackgroundTasks, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from transformers import BertTokenizer
 from utils.model import BertClassification, TextEmbedder
 from utils.config import device
 from sqlalchemy import create_engine, text, select, insert, delete, update, func, MetaData, Table, Column, Text, Boolean
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -31,6 +29,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from uuid import uuid4
 from docx import Document
+from docx.oxml.ns import qn
+from docx.shared import Cm
 
 jieba.setLogLevel(logging.ERROR)
 
@@ -585,14 +585,16 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                 base_query.format(column='sensitive') + " GROUP BY strftime('%Y-%m-%d', time), type, sensitive"),
                 parameters).fetchall()
             data_sensitive = structure_data2(results)
-            response['data_sensitive'] = data_sensitive
+            if len(data_sensitive) != 0:
+                response['data_sensitive'] = data_sensitive
 
         if 'data_human_llm' in activate:  # 大模型生成数量趋势
             results = data_db.execute(text(
                 base_query.format(column='is_bot') + " GROUP BY strftime('%Y-%m-%d', time), type, is_bot"),
                 parameters).fetchall()
             data_human_llm = structure_data2(results)
-            response['data_human_llm'] = data_human_llm
+            if len(data_human_llm) != 0:
+                response['data_human_llm'] = data_human_llm
 
         if 'data_model_judgment' in activate:
             results = data_db.execute(text(
@@ -600,7 +602,8 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                     column='model_judgment') + " GROUP BY strftime('%Y-%m-%d', time), type, model_judgment"),
                 parameters).fetchall()
             data_model_judgment = structure_data2(results)
-            response['data_model_judgment'] = data_model_judgment
+            if len(data_model_judgment) != 0:
+                response['data_model_judgment'] = data_model_judgment
 
         if 'today_sensitive' in activate:
             results = daily_data_db.execute(text('''
@@ -642,57 +645,61 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
         if 'topic_count' in activate:  # 话题信息总量
             results = daily_data_db.query(DailyData.topic, func.count(DailyData.ID)).filter(
                 DailyData.topic != None).group_by(DailyData.topic).all()
-            topic_count = {}
-            for topic in topic_list:
-                topic_count[topic] = 0
-            for row in results:
-                row_topics = row.topic.split(' ')
-                for row_topic in row_topics:
-                    topic_count[row_topic] += row[1]
+            if results is not None:
+                topic_count = {}
+                for topic in topic_list:
+                    topic_count[topic] = 0
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        topic_count[row_topic] += row[1]
 
-            response['topic_count'] = topic_count
+                response['topic_count'] = topic_count
 
         if 'topic_sen' in activate:  # 话题-敏感信息量
             results = daily_data_db.query(DailyData.topic, DailyData.sensitive, func.count(DailyData.ID)).filter(
                 DailyData.topic != None).group_by(DailyData.topic, DailyData.sensitive).all()
-            topic_sen = {}
-            for topic in topic_list:
-                topic_sen[topic] = {1: 0, 0: 0}
-            for row in results:
-                row_topics = row.topic.split(' ')
-                for row_topic in row_topics:
-                    topic_sen[row_topic][row.sensitive] += row[2]
+            if results is not None:
+                topic_sen = {}
+                for topic in topic_list:
+                    topic_sen[topic] = {1: 0, 0: 0}
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        topic_sen[row_topic][row.sensitive] += row[2]
 
-            response['topic_sen'] = topic_sen
+                response['topic_sen'] = topic_sen
 
         if 'topic_human_llm' in activate:  # 话题-人机生成量
             results = daily_data_db.query(DailyData.topic, DailyData.is_bot, func.count(DailyData.ID)).filter(
                 DailyData.topic != None).group_by(DailyData.topic, DailyData.is_bot).all()
-            topic_human_llm = {}
-            for topic in topic_list:
-                topic_human_llm[topic] = {1: 0, 0: 0}
-            for row in results:
-                row_topics = row.topic.split(' ')
-                for row_topic in row_topics:
-                    topic_human_llm[row_topic][row.is_bot] += row[2]
+            if results is not None:
+                topic_human_llm = {}
+                for topic in topic_list:
+                    topic_human_llm[topic] = {1: 0, 0: 0}
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        topic_human_llm[row_topic][row.is_bot] += row[2]
 
-            response['topic_human_llm'] = topic_human_llm
+                response['topic_human_llm'] = topic_human_llm
 
         if 'topic_type' in activate:  # 话题-来源量
             results = daily_data_db.query(DailyData.topic, DailyData.type, func.count(DailyData.ID)).filter(
                 DailyData.topic != None).group_by(DailyData.topic, DailyData.type).all()
-            topic_type = {}
-            for topic in topic_list:
-                topic_type[topic] = {}
-                for type in type_list:
-                    topic_type[topic][type] = 0
-                topic_type[topic][None] = 0
-            for row in results:
-                row_topics = row.topic.split(' ')
-                for row_topic in row_topics:
-                    topic_type[row_topic][row.type] += row[2]
+            if results is not None:
+                topic_type = {}
+                for topic in topic_list:
+                    topic_type[topic] = {}
+                    for type in type_list:
+                        topic_type[topic][type] = 0
+                    topic_type[topic][None] = 0
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        topic_type[row_topic][row.type] += row[2]
 
-            response['topic_type'] = topic_type
+                response['topic_type'] = topic_type
 
         if len(response) == 0:
             return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={'message': 'No Record'})
@@ -704,6 +711,7 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
 
 @app.put('/submit')
 def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
+           data_db: Session = Depends(get_db(SessionLocalData)),
            daily_data_db: Session = Depends(get_db(SessionLocalDailyData)),
            temp_sen_db: Session = Depends(get_db(SessionLocalTempSen)),
            temp_human_llm_db: Session = Depends(get_db(SessionLocalTempHumanLLM))) -> JSONResponse:
@@ -749,6 +757,17 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
                                                                   uuid=uuid
                                                                   ))
             temp_human_llm_db.commit()
+
+            data_db.execute(insert(Data).values(type=record.type,
+                                                time=record.time,
+                                                push_time=record.time,
+                                                content=record.content,
+                                                sensitive=record.sensitive,
+                                                sensitive_score=record.sensitive_score,
+                                                is_bot=record.is_bot,
+                                                is_bot_score=record.is_bot_score,
+                                                model_judgment=record.model_judgment,
+                                                ))
 
             daily_data_db.execute(delete(DailyData).filter(DailyData.ID == ID_))
             daily_data_db.commit()
@@ -1168,9 +1187,12 @@ def analysis_report(start_date: str, end_date: str, content_keyword: str, width:
         for type in type_list:
             try:
                 peak_date = max(sen_distribution_dict[type]['date'],
-                                key=lambda x: sen_distribution_dict[type]['date'][x][0])
-                report += f"{type}中的信息在{peak_date.strftime('%Y年%#m月%#d日')}上涉华敏感信息的数量达到峰值，"
+                                key=sen_distribution_dict[type]['date'].get)
+                report += f"{type}中的信息在{datetime.strptime(peak_date, '%Y-%m-%d').strftime('%Y年%#m月%#d日')}上涉华敏感信息的数量达到峰值，"
             except:
+                import traceback
+                error = traceback.format_exc()
+                print(error)
                 report += f"{type}中的信息暂无时间分布，"
         report = report[:-1] + '。\n' + '其传播趋势如下：'
         current_date = datetime.now()
@@ -1178,7 +1200,7 @@ def analysis_report(start_date: str, end_date: str, content_keyword: str, width:
         for type in type_list:
             try:
                 peak_date = max(sen_distribution_dict[type]['date'],
-                                key=lambda x: sen_distribution_dict[type]['date'][x][0])
+                                key=sen_distribution_dict[type]['date'].get)
                 peak_date_dt = datetime.strptime(peak_date, '%Y-%m-%d')
                 if peak_date_dt >= one_month_ago:
                     report += f"{type}中该话题仍处于强敏感环境中，潜在传播风险比较高，需要对其进行重点观测和防备。"
@@ -1197,8 +1219,8 @@ def analysis_report(start_date: str, end_date: str, content_keyword: str, width:
         for type in type_list:
             try:
                 peak_date = max(human_distribution_dict[type]['date'],
-                                key=lambda x: human_distribution_dict[type]['date'][x][0])
-                report += f"{type}中的信息在{peak_date.strftime('%Y年%#m月%#d日')}上生成式信息的数量达到峰值，"
+                                key=human_distribution_dict[type]['date'].get)
+                report += f"{type}中的信息在{datetime.strptime(peak_date, '%Y-%m-%d').strftime('%Y年%#m月%#d日')}上生成式信息的数量达到峰值，"
             except:
                 report += f"{type}中的信息暂无时间分布，"
         report = report[:-1] + '。\n'
@@ -1272,16 +1294,38 @@ def generate_report(report_id: str):
         data = report_data_store[report_id]
 
         document = Document()
-        document.add_heading('多维特征分析报告', level=1)
-        document.add_heading(f"话题：{data['topic']}", level=2)
-        document.add_paragraph(f"时间：{data['start_date']} 至 {'end_date'}")
-        document.add_paragraph(f"关键词：{'、'.join(data['keywords'])}。")
-        image_stream = io.BytesIO(base64.b64decode(data['wordcloud']))
-        document.add_heading('词云图', level=3)
-        document.add_picture(image_stream)
+        document.styles['Normal'].font.name = u'宋体'
+        document.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋体')
 
-        document.add_heading(f"文字报告内容", level=3)
-        document.add_paragraph(f"   {data['report']}")
+        head = document.add_heading('', level=1)
+        run = head.add_run(f"多维特征分析报告：{data['topic']}")
+        run.font.name = u'宋体'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), u'Cambria')
+
+        document.add_paragraph(f"时间：{data['start_date']} 至 {data['end_date']}")
+        document.add_paragraph(f"关键词：{'、'.join(data['keywords'])}。")
+
+        head = document.add_heading('', level=2)
+        run = head.add_run("词云图")
+        run.font.name = u'宋体'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), u'Cambria')
+
+        image_stream = io.BytesIO(base64.b64decode(data['wordcloud']))
+        picture = document.add_picture(image_stream)
+        picture.width = Cm(15)
+        picture.height = Cm(7.5)
+
+        head = document.add_heading('', level=2)
+        run = head.add_run("文字报告内容")
+        run.font.name = u'宋体'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), u'Cambria')
+
+        for p in data['report'].split('\n'):
+            document.add_paragraph(f"   {p}")
+
+        # document.save(f'./{report_id}.docx')
+        #
+        # return FileResponse(f'./{report_id}.docx', )
 
         file_stream = io.BytesIO()
         document.save(file_stream)

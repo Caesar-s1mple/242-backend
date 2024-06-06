@@ -7,12 +7,12 @@ import random
 import time
 import torch
 import uvicorn
-from fastapi import FastAPI, status, BackgroundTasks, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi import FastAPI, status, BackgroundTasks, Depends, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from transformers import BertTokenizer
 from utils.model import BertClassification, TextEmbedder
 from utils.config import device
-from sqlalchemy import create_engine, text, select, insert, delete, update, func, MetaData, Table, Column, Text, Boolean
+from sqlalchemy import create_engine, text, select, insert, delete, func, MetaData, Table, Column, Boolean, Text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -31,6 +31,11 @@ from uuid import uuid4
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm
+
+from redis import asyncio as aioredis
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.redis import RedisBackend
+from fastapi_cache.decorator import cache
 
 jieba.setLogLevel(logging.ERROR)
 
@@ -58,6 +63,9 @@ stopwords = set()
 with open('./utils/stopwords.txt', 'r', encoding='utf-8') as f:
     for line in f.readlines():
         stopwords.add(line.strip())
+
+with open('./utils/topic_mapping.json', 'r', encoding='utf-8') as f:
+    topic_mapping_dict = json.load(f)
 
 daily_data_queue = Queue()
 
@@ -103,6 +111,17 @@ def get_db(session_local):
 metadata = MetaData()
 
 
+def topic_map(content):
+    topics = []
+    for i in topic_list:
+        for kw in topic_mapping_dict[i]:
+            if kw in content:
+                topics.append(i)
+                break
+
+    return topics
+
+
 def add_column_if_not_exists(engine, table_name, column, default=None):
     metadata.bind = engine
     table = Table(table_name, metadata, autoload_with=engine)
@@ -130,18 +149,28 @@ def init_db():
     TempHumanLLM.__table__.create(engine_temp_human_llm, checkfirst=True)
     LLMRank.__table__.create(engine_llm_rank, checkfirst=True)
 
-    add_column_if_not_exists(engine_sen, 'sen', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
-    add_column_if_not_exists(engine_human_llm, 'human_llm', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
-    add_column_if_not_exists(engine_temp_sen, 'temp_sen', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
-    add_column_if_not_exists(engine_temp_human_llm, 'temp_human_llm', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
-    add_column_if_not_exists(engine_data, 'data', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
-    add_column_if_not_exists(engine_daily_data, 'daily_data', Column('push_time', Text),
-                             "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    # add_column_if_not_exists(engine_sen, 'sen', Column('push_time', Text),
+    #                          "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    # add_column_if_not_exists(engine_human_llm, 'human_llm', Column('push_time', Text),
+    #                          "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    # add_column_if_not_exists(engine_temp_sen, 'temp_sen', Column('push_time', Text),
+    #                          "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    # add_column_if_not_exists(engine_temp_human_llm, 'temp_human_llm', Column('push_time', Text),
+    #                          "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    # add_column_if_not_exists(engine_data, 'data', Column('push_time', Text),
+    #                          "'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    add_column_if_not_exists(engine_daily_data, 'daily_data', Column('submitted', Text), default='FALSE')
+    add_column_if_not_exists(engine_human_llm, 'human_llm', Column('submitted_time', Text),
+                             default="'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+    add_column_if_not_exists(engine_sen, 'sen', Column('submitted_time', Text),
+                             default="'" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "'")
+
+    daily_daba_db = SessionLocalDailyData()
+    daily_daba_db.execute(delete(DailyData).filter(DailyData.submitted == True, func.strftime(DailyData.push_time,
+                                                                                              '%Y-%m-%d') != datetime.now().strftime(
+        '%Y-%m-%d')))
+    daily_daba_db.commit()
+    daily_daba_db.close()
 
 
 def predict_sensitive(content: str, max_length: int = 512) -> (bool, float):
@@ -287,21 +316,23 @@ def llm_det(content: str) -> JSONResponse:
 
 @app.post('/push_data')
 def push_data(background_tasks: BackgroundTasks, type: str, date_time: str, content: str, url: str = None,
-              topic: str = None, db: Session = Depends(get_db(SessionLocalDailyData))) -> JSONResponse:
+              daily_data_db: Session = Depends(get_db(SessionLocalDailyData))) -> JSONResponse:
     if type not in type_list:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': '输入类型错误'})
     try:
-        result = db.execute(
+        topic = topic_map(content)
+
+        result = daily_data_db.execute(
             insert(DailyData).values(type=type, time=datetime.strptime(date_time, '%Y-%m-%d %H:%M:%S'),
                                      push_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), content=content,
                                      sensitive=False, sensitive_score=0., is_bot=False, is_bot_score=0.,
-                                     model_judgment=None, url=url, topic=topic))
+                                     model_judgment=None, url=url, topic=' '.join(topic)) if len(topic) else None)
         data_id = result.lastrowid
-        db.commit()
+        daily_data_db.commit()
 
-        background_tasks.add_task(process_daily_data, data_id)
+        background_tasks.add_task(queue_daily_data, data_id)
 
-        row_count = db.query(func.count(DailyData.ID))
+        row_count = daily_data_db.query(DailyData.ID).count()
 
         return JSONResponse(content={'daily_count': row_count})
     except:
@@ -485,6 +516,40 @@ def llm_rank(start_date: str, end_date: str,
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
+
+
+@cache(expire=300)
+def get_cached_paint_data(activate: list, start_date: str = None, end_date: str = None):
+    response = {}
+    if set(activate) & {'human_llm_sen_count', 'human_llm_type_distribution', 'data_human_llm', 'today_human_llm_count', 'human_llm_db'}:
+        human_llm_db = SessionLocalHumanLLM()
+        if 'human_llm_count' in activate:  # 两个语料库总量
+            response['human_llm_count'] = human_llm_db.query(HumanLLM.ID).count()
+        if 'human_llm_type_distribution' in activate:  # 人机语料库语料来源分布
+            results = human_llm_db.query(HumanLLM.type, func.count(HumanLLM.ID)).group_by(HumanLLM.type).all()
+            response['human_llm_type_distribution'] = {row.type: row[1] for row in results}
+
+
+    if set(activate) & {'human_llm_sen_count', 'sen_type_distribution', 'data_sensitive', 'today_sen_count', 'sen_db'}:
+        sen_db = SessionLocalSen()
+        if 'sen_count' in activate:  # 两个语料库总量
+            response['sen_count'] = sen_db.query(Sen.ID).count()
+        if 'sen_type_distribution' in activate:  # 敏感数据库语料来源分布
+            results = sen_db.query(Sen.type, func.count(Sen.ID)).group_by(Sen.type).all()
+            response['sen_type_distribution'] = {row.type: row[1] for row in results}
+
+
+
+    if set(activate) & {'data_time_distribution', 'topic_count'}:
+        data_db = SessionLocalData()
+
+
+    if set(activate) & {'today_data_count', 'today_topic_type', 'today_topic_count', 'today_topic_sen', 'today_topic_human_llm'}:
+        daily_data_db = SessionLocalDailyData()
+
+
+
+
 @app.get('/paint_data')
 def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                    human_llm_db: Session = Depends(get_db(SessionLocalHumanLLM)),
@@ -493,26 +558,35 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                    daily_data_db: Session = Depends(get_db(SessionLocalDailyData))) -> JSONResponse:
     activate = activate.split('&')
     try:
+        response = get_cached_paint_data(activate, start_date, end_date)
         response = {}
-        if 'human_llm_count' in activate:
-            results = human_llm_db.execute(text('''
-                SELECT model_judgment, COUNT(*)
-                FROM human_llm GROUP BY model_judgment
-            ''')).fetchall()
-            human_llm_count = {row.model_judgment: row[1] for row in results}
-            response['human_llm_count'] = human_llm_count
+        # if 'human_llm_count' in activate:
+        #     results = human_llm_db.execute(text('''
+        #         SELECT model_judgment, COUNT(*)
+        #         FROM human_llm GROUP BY model_judgment
+        #     ''')).fetchall()
+        #     human_llm_count = {row.model_judgment: row[1] for row in results}
+        #     response['human_llm_count'] = human_llm_count
 
-        if 'sensitive_count' in activate:
-            results = sen_db.execute(text('''
-                SELECT sensitive, COUNT(*)
-                FROM sen GROUP BY sensitive
-            ''')).fetchall()
-            sensitive_count = {row.sensitive: row[1] for row in results}
-            response['sensitive_count'] = sensitive_count
+        # if 'sensitive_count' in activate:
+        #     results = sen_db.execute(text('''
+        #         SELECT sensitive, COUNT(*)
+        #         FROM sen GROUP BY sensitive
+        #     ''')).fetchall()
+        #     sensitive_count = {row.sensitive: row[1] for row in results}
+        #     response['sensitive_count'] = sensitive_count
 
-        if 'human_llm_sen_count' in activate:
+        if 'human_llm_sen_count' in activate:  # 两个语料库总量
             human_llm_sen_count = {'human_llm': human_llm_db.query(HumanLLM).count(), 'sen': sen_db.query(Sen).count()}
             response['human_llm_sen_count'] = human_llm_sen_count
+
+        if 'sen_type_distribution' in activate:  # 敏感数据库语料来源分布
+            results = sen_db.query(Sen.type, func.count(Sen.ID)).group_by(Sen.type).all()
+            response['sen_type_distribution'] = {row.type: row[1] for row in results}
+
+        if 'human_llm_type_distribution' in activate:  # 人机语料库语料来源分布
+            results = human_llm_db.query(HumanLLM.type, func.count(HumanLLM.ID)).group_by(HumanLLM.type).all()
+            response['human_llm_type_distribution'] = {row.type: row[1] for row in results}
 
         def structure_data1(results):
             structured_data = {}
@@ -524,37 +598,37 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
 
         base_query = '''
                     SELECT strftime('%Y-%m-%d', time), type, COUNT(*)
-                    FROM {database}
+                    FROM {database} WHERE time IS NOT NULL
         '''
         parameters = {}
         if start_date and end_date:
-            base_query += ' WHERE time BETWEEN :sd AND :ed'
+            base_query += ' AND time BETWEEN :sd AND :ed'
             parameters['sd'] = datetime.strptime(start_date, '%Y-%m-%d')
             parameters['ed'] = datetime.strptime(end_date, '%Y-%m-%d')
         elif start_date:
-            base_query += ' WHERE time >= :sd'
+            base_query += ' AND time >= :sd'
             parameters['sd'] = datetime.strptime(start_date, '%Y-%m-%d')
         elif end_date:
-            base_query += ' WHERE time <= :ed'
+            base_query += ' AND time <= :ed'
             parameters['ed'] = datetime.strptime(end_date, '%Y-%m-%d')
 
         if 'human_llm_time_distribution' in activate:
             results = human_llm_db.execute(text(
-                base_query.format(database='human_llm') + " GROUP BY strftime('%Y-%m-%d', time), type"),
+                base_query.format(database='human_llm') + " GROUP BY time, type"),
                 parameters).fetchall()
             human_llm_time_distribution = structure_data1(results)
             response['human_llm_time_distribution'] = human_llm_time_distribution
 
         if 'sen_time_distribution' in activate:
             results = sen_db.execute(text(
-                base_query.format(database='sen') + " GROUP BY strftime('%Y-%m-%d', time), type"),
+                base_query.format(database='sen') + " GROUP BY time, type"),
                 parameters).fetchall()
             sen_time_distribution = structure_data1(results)
             response['sen_time_distribution'] = sen_time_distribution
 
-        if 'data_time_distribution' in activate:
+        if 'data_time_distribution' in activate:  # 历史数据量统计（四通道柱状图）
             results = data_db.execute(text(
-                base_query.format(database='data') + " GROUP BY strftime('%Y-%m-%d', time), type"),
+                base_query.format(database='data') + " GROUP BY time, type"),
                 parameters).fetchall()
             data_time_distribution = structure_data1(results)
             response['data_time_distribution'] = data_time_distribution
@@ -571,80 +645,80 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
 
         base_query = '''
             SELECT strftime('%Y-%m-%d', time), type, {column}, COUNT(*)
-            FROM data
+            FROM {database} WHERE time IS NOT NULL
         '''
         if start_date and end_date:
-            base_query += ' WHERE time BETWEEN :sd AND :ed'
+            base_query += ' AND time BETWEEN :sd AND :ed'
         elif start_date:
-            base_query += ' WHERE time >= :sd'
+            base_query += ' AND time >= :sd'
         elif end_date:
-            base_query += ' WHERE time <= :ed'
+            base_query += ' AND time <= :ed'
 
         if 'data_sensitive' in activate:  # 敏感数量趋势
-            results = data_db.execute(text(
-                base_query.format(column='sensitive') + " GROUP BY strftime('%Y-%m-%d', time), type, sensitive"),
+            results = sen_db.execute(text(
+                base_query.format(column='sensitive', database='sen') + " GROUP BY time, type, sensitive"),
                 parameters).fetchall()
             data_sensitive = structure_data2(results)
             if len(data_sensitive) != 0:
                 response['data_sensitive'] = data_sensitive
 
         if 'data_human_llm' in activate:  # 大模型生成数量趋势
-            results = data_db.execute(text(
-                base_query.format(column='is_bot') + " GROUP BY strftime('%Y-%m-%d', time), type, is_bot"),
+            results = human_llm_db.execute(text(
+                base_query.format(column='is_bot', database='human_llm') + " GROUP BY time, type, is_bot"),
                 parameters).fetchall()
             data_human_llm = structure_data2(results)
             if len(data_human_llm) != 0:
                 response['data_human_llm'] = data_human_llm
 
-        if 'data_model_judgment' in activate:
-            results = data_db.execute(text(
-                base_query.format(
-                    column='model_judgment') + " GROUP BY strftime('%Y-%m-%d', time), type, model_judgment"),
-                parameters).fetchall()
-            data_model_judgment = structure_data2(results)
-            if len(data_model_judgment) != 0:
-                response['data_model_judgment'] = data_model_judgment
+        # if 'data_model_judgment' in activate:
+        #     results = data_db.execute(text(
+        #         base_query.format(
+        #             column='model_judgment') + " GROUP BY time, type, model_judgment"),
+        #         parameters).fetchall()
+        #     data_model_judgment = structure_data2(results)
+        #     if len(data_model_judgment) != 0:
+        #         response['data_model_judgment'] = data_model_judgment
 
-        if 'today_sensitive' in activate:
-            results = daily_data_db.execute(text('''
-                SELECT type, sensitive, COUNT(*)
-                FROM daily_data GROUP BY type, sensitive
-            ''')).fetchall()
-            today_sensitive = structure_data1(results)
-            response['today_sensitive'] = today_sensitive
+        # if 'today_sensitive' in activate:
+        #     results = daily_data_db.execute(text('''
+        #         SELECT type, sensitive, COUNT(*)
+        #         FROM daily_data GROUP BY type, sensitive
+        #     ''')).fetchall()
+        #     today_sensitive = structure_data1(results)
+        #     response['today_sensitive'] = today_sensitive
 
-        if 'today_human_llm' in activate:
-            results = daily_data_db.execute(text('''
-                SELECT type, is_bot, COUNT(*)
-                FROM daily_data GROUP BY type, is_bot
-            ''')).fetchall()
-            today_human_llm = structure_data1(results)
-            response['today_human_llm'] = today_human_llm
+        # if 'today_human_llm' in activate:
+        #     results = daily_data_db.execute(text('''
+        #         SELECT type, is_bot, COUNT(*)
+        #         FROM daily_data GROUP BY type, is_bot
+        #     ''')).fetchall()
+        #     today_human_llm = structure_data1(results)
+        #     response['today_human_llm'] = today_human_llm
 
-        if 'today_model_judgment' in activate:
-            results = daily_data_db.execute(text('''
-                SELECT type, model_judgment, COUNT(*)
-                FROM daily_data GROUP BY type, model_judgment
-            ''')).fetchall()
-            today_model_judgment = structure_data1(results)
-            response['today_model_judgment'] = today_model_judgment
+        # if 'today_model_judgment' in activate:
+        #     results = daily_data_db.execute(text('''
+        #         SELECT type, model_judgment, COUNT(*)
+        #         FROM daily_data GROUP BY type, model_judgment
+        #     ''')).fetchall()
+        #     today_model_judgment = structure_data1(results)
+        #     response['today_model_judgment'] = today_model_judgment
 
         today = datetime.now().strftime('%Y-%m-%d')
         if 'today_data_count' in activate:  # 今日到来
             response['today_data_count'] = daily_data_db.query(DailyData.ID).filter(
-                func.strftime('%Y-%m-%d', DailyData.time) == today).count()
+                func.strftime('%Y-%m-%d', DailyData.push_time) == today).count()
 
-        if 'today_human_llm_count' in activate:  # 今日敏感
+        if 'today_human_llm_count' in activate:  # 今日敏感数据库新增
             response['today_human_llm_count'] = human_llm_db.query(HumanLLM.ID).filter(
-                func.strftime('%Y-%m-%d', HumanLLM.push_time) == today).count()
+                func.strftime('%Y-%m-%d', HumanLLM.submitted_time) == today).count()
 
-        if 'today_sen_count' in activate:  # 今日大模型生成
+        if 'today_sen_count' in activate:  # 今日人机判别数据库新增
             response['today_sen_count'] = sen_db.query(Sen.ID).filter(
-                func.strftime('%Y-%m-%d', Sen.push_time) == today).count()
+                func.strftime('%Y-%m-%d', Sen.submitted_time) == today).count()
 
         if 'topic_count' in activate:  # 话题信息总量
-            results = daily_data_db.query(DailyData.topic, func.count(DailyData.ID)).filter(
-                DailyData.topic != None).group_by(DailyData.topic).all()
+            results = data_db.query(Data.topic, func.count(Data.ID)).filter(
+                Data.topic != None).group_by(Data.topic).all()
             if results is not None:
                 topic_count = {}
                 for topic in topic_list:
@@ -657,8 +731,8 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                 response['topic_count'] = topic_count
 
         if 'topic_sen' in activate:  # 话题-敏感信息量
-            results = daily_data_db.query(DailyData.topic, DailyData.sensitive, func.count(DailyData.ID)).filter(
-                DailyData.topic != None).group_by(DailyData.topic, DailyData.sensitive).all()
+            results = sen_db.query(Sen.topic, Sen.sensitive, func.count(Sen.ID)).filter(
+                Sen.topic != None).group_by(Sen.topic, Sen.sensitive).all()
             if results is not None:
                 topic_sen = {}
                 for topic in topic_list:
@@ -671,8 +745,8 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
                 response['topic_sen'] = topic_sen
 
         if 'topic_human_llm' in activate:  # 话题-人机生成量
-            results = daily_data_db.query(DailyData.topic, DailyData.is_bot, func.count(DailyData.ID)).filter(
-                DailyData.topic != None).group_by(DailyData.topic, DailyData.is_bot).all()
+            results = human_llm_db.query(HumanLLM.topic, HumanLLM.is_bot, func.count(HumanLLM.ID)).filter(
+                HumanLLM.topic != None).group_by(HumanLLM.topic, HumanLLM.is_bot).all()
             if results is not None:
                 topic_human_llm = {}
                 for topic in topic_list:
@@ -684,9 +758,10 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
 
                 response['topic_human_llm'] = topic_human_llm
 
-        if 'topic_type' in activate:  # 话题-来源量
+        if 'today_topic_type' in activate:  # 今日 话题-来源量
             results = daily_data_db.query(DailyData.topic, DailyData.type, func.count(DailyData.ID)).filter(
-                DailyData.topic != None).group_by(DailyData.topic, DailyData.type).all()
+                DailyData.topic != None, func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
+                DailyData.topic, DailyData.type).all()
             if results is not None:
                 topic_type = {}
                 for topic in topic_list:
@@ -701,11 +776,59 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None,
 
                 response['topic_type'] = topic_type
 
+        if 'today_topic_count' in activate:  # 今日 话题信息量
+            results = daily_data_db.query(DailyData.topic, func.count(Data.ID)).filter(
+                DailyData.topic != None, func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
+                DailyData.topic).all()
+            if results is not None:
+                today_topic_count = {}
+                for topic in topic_list:
+                    today_topic_count[topic] = 0
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        today_topic_count[row_topic] += row[1]
+
+                response['today_topic_count'] = today_topic_count
+
+        if 'today_topic_sen' in activate:  # 今日 话题-敏感信息量
+            results = daily_data_db.query(DailyData.topic, DailyData.sensitive, func.count(DailyData.ID)).filter(
+                DailyData.topic != None, func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
+                DailyData.topic, DailyData.sensitive).all()
+            if results is not None:
+                today_topic_sen = {}
+                for topic in topic_list:
+                    today_topic_sen[topic] = {1: 0, 0: 0}
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        today_topic_sen[row_topic][row.sensitive] += row[2]
+
+                response['today_topic_sen'] = today_topic_sen
+
+        if 'today_topic_human_llm' in activate:  # 今日 话题-人机生成量
+            results = daily_data_db.query(DailyData.topic, DailyData.is_bot, func.count(DailyData.ID)).filter(
+                DailyData.topic != None, func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
+                DailyData.topic, DailyData.is_bot).all()
+            if results is not None:
+                today_topic_human_llm = {}
+                for topic in topic_list:
+                    today_topic_human_llm[topic] = {1: 0, 0: 0}
+                for row in results:
+                    row_topics = row.topic.split(' ')
+                    for row_topic in row_topics:
+                        today_topic_human_llm[row_topic][row.sensitive] += row[2]
+
+                response['today_topic_human_llm'] = today_topic_human_llm
+
         if len(response) == 0:
             return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={'message': 'No Record'})
 
         return JSONResponse(content=response)
     except Exception as e:
+        import traceback
+        error = traceback.format_exc()
+        print(error)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
@@ -767,9 +890,13 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
                                                 is_bot=record.is_bot,
                                                 is_bot_score=record.is_bot_score,
                                                 model_judgment=record.model_judgment,
+                                                url=record.url,
+                                                topic=record.topic,
+                                                uuid=record.uuid
                                                 ))
+            data_db.commit()
 
-            daily_data_db.execute(delete(DailyData).filter(DailyData.ID == ID_))
+            record.submitted = True
             daily_data_db.commit()
 
         return JSONResponse(content={'message': 'Update Submitted'})
@@ -781,13 +908,15 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
 @app.put('/update/sen')
 def update_sen(ID: str, approve: str, auditor: str,
                temp_sen_db: Session = Depends(get_db(SessionLocalTempSen)),
-               sen_db: Session = Depends(get_db(SessionLocalSen))) -> JSONResponse:
+               sen_db: Session = Depends(get_db(SessionLocalSen)),
+               data_db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
     try:
         IDs = list(map(int, ID.split('&')))
         approves = list(map(bool, approve.split('&')))
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
+        submitted_time = datetime.now().strftime('%Y-%m-%d')
         for ID_, approve_ in zip(IDs, approves):
             if approve_:
                 record = temp_sen_db.query(TempSen).filter(TempSen.ID == ID_).first()
@@ -797,6 +926,7 @@ def update_sen(ID: str, approve: str, auditor: str,
                 sen_db.execute(insert(Sen).values(type=record.type,
                                                   time=record.time,
                                                   push_time=record.push_time,
+                                                  submitted_time=submitted_time,
                                                   content=record.content,
                                                   sensitive=record.sensitive,
                                                   sensitive_score=record.sensitive_score,
@@ -806,6 +936,11 @@ def update_sen(ID: str, approve: str, auditor: str,
                                                   uuid=record.uuid
                                                   ))
                 sen_db.commit()
+
+                data_record = data_db.query(Data).filter(Data.uuid == record.uuid).first()
+                data_record.sensitive = record.sensitive
+                data_record.sensitive_score = record.sensitive_score
+                data_db.commit()
 
             temp_sen_db.execute(delete(TempSen).filter(TempSen.ID == ID_))
             temp_sen_db.commit()
@@ -819,13 +954,15 @@ def update_sen(ID: str, approve: str, auditor: str,
 @app.put('/update/human_llm')
 def update_human_llm(ID: str, approve: str, auditor: str,
                      temp_human_llm_db: Session = Depends(get_db(SessionLocalTempHumanLLM)),
-                     human_llm_db: Session = Depends(get_db(SessionLocalHumanLLM))) -> JSONResponse:
+                     human_llm_db: Session = Depends(get_db(SessionLocalHumanLLM)),
+                     data_db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
     try:
         IDs = list(map(int, ID.split('&')))
         approves = list(map(bool, approve.split('&')))
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
+        submitted_time = datetime.now().strftime('%Y-%m-%d')
         for ID_, approve_ in zip(IDs, approves):
             if approve_:
                 record = temp_human_llm_db.query(TempHumanLLM).filter(TempHumanLLM.ID == ID_).first()
@@ -835,6 +972,7 @@ def update_human_llm(ID: str, approve: str, auditor: str,
                 human_llm_db.execute(insert(HumanLLM).values(type=record.type,
                                                              time=record.time,
                                                              push_time=record.push_time,
+                                                             submitted_time=submitted_time,
                                                              content=record.content,
                                                              is_bot=record.is_bot,
                                                              is_bot_score=record.is_bot_score,
@@ -845,6 +983,12 @@ def update_human_llm(ID: str, approve: str, auditor: str,
                                                              uuid=record.uuid
                                                              ))
                 human_llm_db.commit()
+
+                data_record = data_db.query(Data).filter(Data.uuid == record.uuid).first()
+                data_record.is_bot = record.is_bot
+                data_record.is_bot_score = record.is_bot_score
+                data_record.model_judgment = record.model_judgment
+                data_db.commit()
 
             temp_human_llm_db.execute(delete(TempHumanLLM).filter(TempHumanLLM.ID == ID_))
             temp_human_llm_db.commit()
@@ -1190,9 +1334,6 @@ def analysis_report(start_date: str, end_date: str, content_keyword: str, width:
                                 key=sen_distribution_dict[type]['date'].get)
                 report += f"{type}中的信息在{datetime.strptime(peak_date, '%Y-%m-%d').strftime('%Y年%#m月%#d日')}上涉华敏感信息的数量达到峰值，"
             except:
-                import traceback
-                error = traceback.format_exc()
-                print(error)
                 report += f"{type}中的信息暂无时间分布，"
         report = report[:-1] + '。\n' + '其传播趋势如下：'
         current_date = datetime.now()
@@ -1374,52 +1515,53 @@ async def process_time_middleware(request: Request, call_next):
     return response
 
 
-def merge_data():
-    try:
-        data_db = SessionLocalData()
-        sen_db = SessionLocalSen()
-        human_llm_db = SessionLocalHumanLLM()
-        sen_records = sen_db.query(Sen).filter(Sen.merged == False).all()
-        for sen_record in sen_records:
-            matching_human_llm_record = human_llm_db.query(HumanLLM).filter(HumanLLM.uuid == sen_record.uuid).first()
-            if matching_human_llm_record is None:
-                data_db.execute(
-                    insert(Data).values(type=sen_record.type, time=sen_record.time, content=sen_record.content,
-                                        sensitive=sen_record.sensitive, sensitive_score=sen_record.sensitive_score,
-                                        is_bot=False, is_bot_score=0, model_judgment=None, url=sen_record.url,
-                                        topic=sen_record.topic, uuid=sen_record.uuid))
-                sen_record.merged = True
-                sen_db.commit()
-            else:
-                data_db.execute(
-                    insert(Data).values(type=sen_record.type, time=sen_record.time, content=sen_record.content,
-                                        sensitive=sen_record.sensitive, sensitive_score=sen_record.sensitive_score,
-                                        is_bot=matching_human_llm_record.is_bot,
-                                        is_bot_score=matching_human_llm_record.is_bot_score,
-                                        model_judgment=matching_human_llm_record.model_judgment, url=sen_record.url,
-                                        topic=sen_record.topic, uuid=sen_record.uuid))
-                sen_record.merged = True
-                matching_human_llm_record.merged = True
-                sen_db.commit()
-                human_llm_db.commit()
-
-        data_db.commit()
-
-        human_llm_records = human_llm_db.query(HumanLLM).filter(HumanLLM.merged == False).all()
-        for human_llm_record in human_llm_records:
-            data_db.execute(insert(Data).values(type=human_llm_record.type, time=human_llm_record.time,
-                                                content=human_llm_record.content, sensitive=False, sensitive_score=0,
-                                                is_bot=human_llm_record.is_bot,
-                                                is_bot_score=human_llm_record.is_bot_score,
-                                                model_judgment=human_llm_record.model_judgment,
-                                                url=human_llm_record.url, topic=human_llm_record.topic,
-                                                uuid=human_llm_record.uuid))
-            human_llm_record.merged = True
-            human_llm_record.commit()
-
-        data_db.commit()
-    except Exception as e:
-        print(str(e))
+# def merge_data():
+#     try:
+#         data_db = SessionLocalData()
+#         sen_db = SessionLocalSen()
+#         human_llm_db = SessionLocalHumanLLM()
+#         sen_records = sen_db.query(Sen).filter(Sen.merged == False).all()
+#         for sen_record in sen_records:
+#             matching_human_llm_record = human_llm_db.query(HumanLLM).filter(HumanLLM.uuid == sen_record.uuid).first()
+#             if matching_human_llm_record is None:
+#                 data_db.execute(
+#                     insert(Data).values(type=sen_record.type, time=sen_record.time, content=sen_record.content,
+#                                         sensitive=sen_record.sensitive, sensitive_score=sen_record.sensitive_score,
+#                                         is_bot=False, is_bot_score=0, model_judgment=None, url=sen_record.url,
+#                                         topic=sen_record.topic, uuid=sen_record.uuid))
+#                 sen_record.merged = True
+#                 sen_db.commit()
+#             else:
+#                 data_db.execute(
+#                     insert(Data).values(type=sen_record.type, time=sen_record.time, content=sen_record.content,
+#                                         sensitive=sen_record.sensitive, sensitive_score=sen_record.sensitive_score,
+#                                         is_bot=matching_human_llm_record.is_bot,
+#                                         is_bot_score=matching_human_llm_record.is_bot_score,
+#                                         model_judgment=matching_human_llm_record.model_judgment, url=sen_record.url,
+#                                         topic=sen_record.topic, uuid=sen_record.uuid))
+#                 sen_record.merged = True
+#                 matching_human_llm_record.merged = True
+#                 sen_db.commit()
+#                 human_llm_db.commit()
+#
+#         data_db.commit()
+#
+#         human_llm_records = human_llm_db.query(HumanLLM).filter(HumanLLM.merged == False).all()
+#         for human_llm_record in human_llm_records:
+#             data_db.execute(insert(Data).values(type=human_llm_record.type, time=human_llm_record.time,
+#                                                 content=human_llm_record.content, sensitive=False, sensitive_score=0,
+#                                                 is_bot=human_llm_record.is_bot,
+#                                                 is_bot_score=human_llm_record.is_bot_score,
+#                                                 model_judgment=human_llm_record.model_judgment,
+#                                                 url=human_llm_record.url, topic=human_llm_record.topic,
+#                                                 uuid=human_llm_record.uuid))
+#             human_llm_record.merged = True
+#             human_llm_record.commit()
+#
+#         data_db.commit()
+#         print('Merged in ', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+#     except Exception as e:
+#         print(str(e))
 
 
 def clear_expired_reports():
@@ -1431,8 +1573,10 @@ def clear_expired_reports():
 
 
 @app.on_event('startup')
-async def app_start():
-    schedular.add_job(merge_data, IntervalTrigger(hours=4))
+async def startup_event():
+    # schedular.add_job(merge_data, IntervalTrigger(hours=4))
+    redis = aioredis.from_url('redis://127.0.0.1', encoding='utf8', decode_responses=True)
+    FastAPICache.init(RedisBackend(redis), prefix='fastapi-cache')
     schedular.add_job(clear_expired_reports, IntervalTrigger(minutes=1))
     schedular.start()
 
@@ -1443,5 +1587,5 @@ def test1():
 
 
 if __name__ == '__main__':
-    # init_db()
+    init_db()
     uvicorn.run(app, host='0.0.0.0', port=8123, log_level='debug')

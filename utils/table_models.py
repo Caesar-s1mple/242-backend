@@ -18,6 +18,7 @@ class DailyData(Base):
     model_judgment = Column(Text)
     url = Column(Text)
     topic = Column(Text)
+    submitted = Column(Boolean, default=False)
 
 
 class Data(Base):
@@ -43,6 +44,7 @@ class HumanLLM(Base):
     type = Column(Text)
     time = Column(Text)
     push_time = Column(Text)
+    submitted_time = Column(Text)
     content = Column(Text)
     is_bot = Column(Boolean)
     is_bot_score = Column(Float)
@@ -51,7 +53,7 @@ class HumanLLM(Base):
     topic = Column(Text)
     auditor = Column(Text)
     uuid = Column(Text)
-    merged = Column(Boolean)
+    merged = Column(Boolean, default=False)
 
 
 class Sen(Base):
@@ -60,6 +62,7 @@ class Sen(Base):
     type = Column(Text)
     time = Column(Text)
     push_time = Column(Text)
+    submitted_time = Column(Text)
     content = Column(Text)
     sensitive = Column(Boolean)
     sensitive_score = Column(Float)
@@ -67,7 +70,7 @@ class Sen(Base):
     topic = Column(Text)
     auditor = Column(Text)
     uuid = Column(Text)
-    merged = Column(Boolean)
+    merged = Column(Boolean, default=False)
 
 
 class TempHumanLLM(Base):

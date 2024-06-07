@@ -572,7 +572,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         for type in type_list:
                             data_human_llm[row[0]][type] = {1: 0, 0: 0}
                         data_human_llm[row[0]][row[1]][row[2]] = row[3]
-                    response['data_human_llm'] = data_human_llm
+                    response['data_human_llm'] = dict(sorted(data_human_llm.items(), key=lambda item: item[0]))
 
         if 'today_human_llm_count' in activate:  # 今日敏感数据库新增
             response['today_human_llm_count'] = human_llm_db.query(HumanLLM.ID).filter(
@@ -609,7 +609,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         human_llm_time_distribution[row[0]][type] = 0
                     human_llm_time_distribution[row[0]][row[1]] = row[2]
 
-                response['human_llm_time_distribution'] = human_llm_time_distribution
+                response['human_llm_time_distribution'] = dict(sorted(human_llm_time_distribution.items(), key=lambda item: item[0]))
 
         human_llm_db.close()
 
@@ -639,7 +639,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         for type in type_list:
                             data_sensitive[row[0]][type] = {1: 0, 0: 0}
                         data_sensitive[row[0]][row[1]][row[2]] = row[3]
-                    response['data_human_llm'] = data_sensitive
+                    response['data_sensitive'] = dict(sorted(data_sensitive.items(), key=lambda item: item[0]))
 
         if 'today_sen_count' in activate:  # 今日人机判别数据库新增
             response['today_sen_count'] = sen_db.query(Sen.ID).filter(
@@ -675,7 +675,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         sen_time_distribution[row[0]][type] = 0
                     sen_time_distribution[row[0]][row[1]] = row[2]
 
-                response['sen_time_distribution'] = sen_time_distribution
+                response['sen_time_distribution'] = dict(sorted(sen_time_distribution.items(), key=lambda item: item[0]))
 
         sen_db.close()
 
@@ -698,7 +698,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         data_time_distribution[row[0]][type] = 0
                     data_time_distribution[row[0]][row[1]] = row[2]
 
-            response['data_time_distribution'] = data_time_distribution
+            response['data_time_distribution'] = dict(sorted(data_time_distribution.items(), key=lambda item: item[0]))
 
         if 'topic_count' in activate:  # 话题信息总量
             results = data_db.query(Data.topic, func.count(Data.ID)).filter(
@@ -725,7 +725,8 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
 
         if 'today_topic_type' in activate:  # 今日 话题-来源量
             results = daily_data_db.query(DailyData.topic, DailyData.type, func.count(DailyData.ID)).filter(
-                DailyData.topic != None, func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
+                DailyData.topic != None, DailyData.type != None,
+                func.strftime('%Y-%m-%d', DailyData.push_time) == today).group_by(
                 DailyData.topic, DailyData.type).all()
             if results is not None:
                 today_topic_type = {}
@@ -799,8 +800,8 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None) 
     try:
         response = get_cached_paint_data(activate, start_date, end_date)
 
-        if not response:
-            return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={'message': 'No Record'})
+        # if not response:
+        #     return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={'message': 'No Record'})
 
         return JSONResponse(content=response)
     except Exception as e:
@@ -1398,8 +1399,8 @@ def analysis_report(start_date: str, end_date: str, content_keyword: str, width:
         'keywords': keywords,
         'sen_type_distribution': sen_type_distribution,
         'human_llm_type_distribution': human_llm_type_distribution,
-        'sen_time_distribution': sen_time_distribution,
-        'human_llm_time_distribution': human_llm_time_distribution,
+        'sen_time_distribution': dict(sorted(sen_time_distribution.items(), key=lambda item: item[0])),
+        'human_llm_time_distribution': dict(sorted(human_llm_time_distribution.items(), key=lambda item: item[0])),
         'wordcloud': base64.b64encode(img_data).decode('utf-8'),
         'report_id': report_id})
 
@@ -1503,6 +1504,7 @@ def clear_cached_items():
                     now > expire_time]
     for expired_key in expired_keys:
         del cached_item_store[expired_key]
+        del cache_expiry_times[expired_key]
 
 
 @app.on_event('startup')

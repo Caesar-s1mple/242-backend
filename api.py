@@ -605,8 +605,8 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                 for row in results:
                     if row[0] not in human_llm_time_distribution:
                         human_llm_time_distribution[row[0]] = {}
-                    for type in type_list:
-                        human_llm_time_distribution[row[0]][type] = 0
+                        for type in type_list:
+                            human_llm_time_distribution[row[0]][type] = 0
                     human_llm_time_distribution[row[0]][row[1]] = row[2]
 
                 response['human_llm_time_distribution'] = dict(sorted(human_llm_time_distribution.items(), key=lambda item: item[0]))
@@ -671,8 +671,8 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                 for row in results:
                     if row[0] not in sen_time_distribution:
                         sen_time_distribution[row[0]] = {}
-                    for type in type_list:
-                        sen_time_distribution[row[0]][type] = 0
+                        for type in type_list:
+                            sen_time_distribution[row[0]][type] = 0
                     sen_time_distribution[row[0]][row[1]] = row[2]
 
                 response['sen_time_distribution'] = dict(sorted(sen_time_distribution.items(), key=lambda item: item[0]))

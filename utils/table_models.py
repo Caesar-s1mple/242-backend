@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, Boolean, Text, Float
 from sqlalchemy.orm import declarative_base
 
+
 Base = declarative_base()
 
 
@@ -53,7 +54,6 @@ class HumanLLM(Base):
     topic = Column(Text)
     auditor = Column(Text)
     uuid = Column(Text)
-    merged = Column(Boolean, default=False)
 
 
 class Sen(Base):
@@ -70,7 +70,6 @@ class Sen(Base):
     topic = Column(Text)
     auditor = Column(Text)
     uuid = Column(Text)
-    merged = Column(Boolean, default=False)
 
 
 class TempHumanLLM(Base):

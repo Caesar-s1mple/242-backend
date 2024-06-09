@@ -7,7 +7,7 @@ import random
 import time
 import torch
 import uvicorn
-from fastapi import FastAPI, status, BackgroundTasks, Depends, Request, Response
+from fastapi import FastAPI, status, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from transformers import BertTokenizer
 from utils.model import BertClassification, TextEmbedder
@@ -332,7 +332,7 @@ def push_data(background_tasks: BackgroundTasks, type: str, date_time: str, cont
             insert(DailyData).values(type=type, time=datetime.strptime(date_time, '%Y-%m-%d %H:%M:%S'),
                                      push_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), content=content,
                                      sensitive=False, sensitive_score=0., is_bot=False, is_bot_score=0.,
-                                     model_judgment=None, url=url, topic=' '.join(topic)) if len(topic) else None)
+                                     model_judgment=None, url=url, topic=' '.join(topic) if len(topic) else None))
         data_id = result.lastrowid
         daily_data_db.commit()
 
@@ -353,6 +353,7 @@ def search_daily_data(page: int = 1, page_size: int = 10, type: str = None, sens
                       db: Session = Depends(get_db(SessionLocalDailyData))) -> JSONResponse:
     try:
         filters = []
+        filters.append(DailyData.submitted == False)
         if type:
             filters.append(DailyData.type == type)
         if sensitive is not None:
@@ -374,7 +375,7 @@ def search_daily_data(page: int = 1, page_size: int = 10, type: str = None, sens
         rows = []
         for row in results:
             rows.append([row.ID, row.type, row.time, row.content, row.sensitive, row.sensitive_score, row.is_bot,
-                         row.is_bot_score, row.model_judgment, row.url, row.topic])
+                         round(row.is_bot_score, 2), row.model_judgment, row.url, row.topic])
 
         return JSONResponse(content={'total_count': total_count, 'data': rows})
     except:
@@ -408,7 +409,7 @@ def search_human_llm(page: int = 1, page_size: int = 10, type: str = None, is_bo
         rows = []
         for row in results:
             rows.append({'ID': row.ID, 'type': row.type, 'time': row.time, 'content': row.content, 'is_bot': row.is_bot,
-                         'is_bot_score': row.is_bot_score, 'model_judgment': row.model_judgment, 'url': row.url,
+                         'is_bot_score': round(row.is_bot_score, 2), 'model_judgment': row.model_judgment, 'url': row.url,
                          'topic': row.topic, 'auditor': row.auditor})
 
         return JSONResponse(content={'total_count': total_count, 'data': rows})
@@ -441,7 +442,7 @@ def search_sen(page: int = 1, page_size: int = 10, type: str = None, sensitive: 
         for row in results:
             rows.append(
                 {'ID': row.ID, 'type': row.type, 'time': row.time, 'content': row.content, 'sensitive': row.sensitive,
-                 'sensitive_score': row.sensitive_score, 'url': row.url, 'topic': row.topic,
+                 'sensitive_score': round(row.sensitive_score, 2), 'url': row.url, 'topic': row.topic,
                  'auditor': row.auditor})
 
         return JSONResponse(content={'total_count': total_count, 'data': rows})
@@ -509,11 +510,11 @@ def llm_rank(start_date: str, end_date: str,
                 n = 0
                 for second_level in results[model][first_level]:
                     score = results[model][first_level][second_level]
-                    temp_dict[second_level] = score
+                    temp_dict[second_level] = round(score, 2) if score else None
                     if score:
                         sum_score += score
                         n += 1
-                temp_dict[first_level] = sum_score / n if n else None
+                temp_dict[first_level] = round(sum_score / n, 2) if n else None
             new_results.append(temp_dict)
 
         return JSONResponse(content={'llm_rank': new_results})
@@ -545,7 +546,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
         parameters['ed'] = datetime.strptime(end_date, '%Y-%m-%d')
 
     if set(activate) & {'human_llm_count', 'human_llm_type_distribution', 'data_human_llm', 'today_human_llm_count',
-                        'human_llm_db', 'topic_human_llm', 'human_llm_time_distribution'}:
+                        'topic_human_llm', 'human_llm_time_distribution', 'human_llm_is_bot_type'}:
         human_llm_db = SessionLocalHumanLLM()
         if 'human_llm_count' in activate:  # 两个语料库总量
             response['human_llm_count'] = human_llm_db.query(HumanLLM.ID).count()
@@ -571,8 +572,8 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         data_human_llm[row[0]] = {}
                         for type in type_list:
                             data_human_llm[row[0]][type] = {1: 0, 0: 0}
-                        data_human_llm[row[0]][row[1]][row[2]] = row[3]
-                    response['data_human_llm'] = dict(sorted(data_human_llm.items(), key=lambda item: item[0]))
+                    data_human_llm[row[0]][row[1]][row[2]] = row[3]
+                response['data_human_llm'] = dict(sorted(data_human_llm.items(), key=lambda item: item[0]))
 
         if 'today_human_llm_count' in activate:  # 今日敏感数据库新增
             response['today_human_llm_count'] = human_llm_db.query(HumanLLM.ID).filter(
@@ -609,12 +610,21 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                             human_llm_time_distribution[row[0]][type] = 0
                     human_llm_time_distribution[row[0]][row[1]] = row[2]
 
-                response['human_llm_time_distribution'] = dict(sorted(human_llm_time_distribution.items(), key=lambda item: item[0]))
+                response['human_llm_time_distribution'] = dict(
+                    sorted(human_llm_time_distribution.items(), key=lambda item: item[0]))
+
+        if 'human_llm_is_bot_type' in activate:
+            results = human_llm_db.query(HumanLLM.type, func.count(HumanLLM.ID)).filter(
+                HumanLLM.type != None, HumanLLM.is_bot == True).group_by(
+                HumanLLM.type).all()
+            if results is not None:
+                response['human_llm_type_distribution'] = {row.type: row[1] for row in results}
+
 
         human_llm_db.close()
 
     if set(activate) & {'sen_count', 'sen_type_distribution', 'data_sensitive', 'today_sen_count', 'topic_sen',
-                        'sen_time_distribution'}:
+                        'sen_time_distribution', 'sen_sensitive_type'}:
         sen_db = SessionLocalSen()
         if 'sen_count' in activate:  # 两个语料库总量
             response['sen_count'] = sen_db.query(Sen.ID).count()
@@ -638,8 +648,8 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                         data_sensitive[row[0]] = {}
                         for type in type_list:
                             data_sensitive[row[0]][type] = {1: 0, 0: 0}
-                        data_sensitive[row[0]][row[1]][row[2]] = row[3]
-                    response['data_sensitive'] = dict(sorted(data_sensitive.items(), key=lambda item: item[0]))
+                    data_sensitive[row[0]][row[1]][row[2]] = row[3]
+                response['data_sensitive'] = dict(sorted(data_sensitive.items(), key=lambda item: item[0]))
 
         if 'today_sen_count' in activate:  # 今日人机判别数据库新增
             response['today_sen_count'] = sen_db.query(Sen.ID).filter(
@@ -675,7 +685,15 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                             sen_time_distribution[row[0]][type] = 0
                     sen_time_distribution[row[0]][row[1]] = row[2]
 
-                response['sen_time_distribution'] = dict(sorted(sen_time_distribution.items(), key=lambda item: item[0]))
+                response['sen_time_distribution'] = dict(
+                    sorted(sen_time_distribution.items(), key=lambda item: item[0]))
+
+        if 'sen_sensitive_type' in activate:
+            results = sen_db.query(Sen.type, func.count(Sen.ID)).filter(
+                Sen.type != None, Sen.sensitive == True).group_by(
+                Sen.type).all()
+            if results is not None:
+                response['sen_sensitive_type'] = {row.type: row[1] for row in results}
 
         sen_db.close()
 
@@ -684,7 +702,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
         base_query = '''
         SELECT strftime('%Y-%m-%d', time), type, COUNT(*)
         FROM {database} WHERE time IS NOT NULL AND type IS NOT NULL
-        '''
+        ''' + added_query
 
         if 'data_time_distribution' in activate:  # 历史数据量统计（四通道柱状图）
             results = data_db.execute(text(
@@ -696,7 +714,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                     data_time_distribution[row[0]] = {}
                     for type in type_list:
                         data_time_distribution[row[0]][type] = 0
-                    data_time_distribution[row[0]][row[1]] = row[2]
+                data_time_distribution[row[0]][row[1]] = row[2]
 
             response['data_time_distribution'] = dict(sorted(data_time_distribution.items(), key=lambda item: item[0]))
 
@@ -811,6 +829,26 @@ def get_paint_data(activate: str, start_date: str = None, end_date: str = None) 
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
+# @app.put('/update/daily_data/{ID}')
+# def update_daily_data(ID: int, is_sensitive: bool, is_bot: bool,
+#                       daily_data_db: Session = Depends(get_db(SessionLocalDailyData))):
+#     try:
+#         record = daily_data_db.query(DailyData).filter(DailyData.ID == ID).first()
+#         if record is not None:
+#             record.sensitive = is_sensitive
+#             record.sensitive_score = float(is_sensitive)
+#             record.is_bot = is_bot
+#             record.is_bot_score = float(is_bot)
+#             if is_bot is False:
+#                 record.model_judgment = None
+#
+#             daily_data_db.commit()
+#
+#         return JSONResponse(status_code=status.HTTP_200_OK, content={'message': 'Updated Successfully'})
+#     except Exception as e:
+#         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=str(e))
+
+
 @app.put('/submit')
 def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
            data_db: Session = Depends(get_db(SessionLocalData)),
@@ -825,7 +863,7 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
         for ID_, is_sensitive_, is_bot_ in zip(IDs, is_sensitive_s, is_bot_s):
-            record = daily_data_db.query(DailyData).filter(DailyData.ID == ID_).first()
+            record = daily_data_db.query(DailyData).filter(DailyData.ID == ID_, DailyData.submitted == False).first()
             if not record:
                 continue
             new_sensitive_score = float(is_sensitive_) if is_sensitive_ != record.sensitive else record.sensitive_score
@@ -864,14 +902,14 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
                                                 time=record.time,
                                                 push_time=record.time,
                                                 content=record.content,
-                                                sensitive=record.sensitive,
-                                                sensitive_score=record.sensitive_score,
-                                                is_bot=record.is_bot,
-                                                is_bot_score=record.is_bot_score,
-                                                model_judgment=record.model_judgment,
+                                                sensitive=is_sensitive_,
+                                                sensitive_score=new_sensitive_score,
+                                                is_bot=is_bot_,
+                                                is_bot_score=new_is_bot_score,
+                                                model_judgment=new_model_judgment,
                                                 url=record.url,
                                                 topic=record.topic,
-                                                uuid=record.uuid
+                                                uuid=uuid
                                                 ))
             data_db.commit()
 
@@ -879,6 +917,86 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
             daily_data_db.commit()
 
         return JSONResponse(content={'message': 'Update Submitted'})
+
+    except Exception as e:
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
+
+
+@app.put('/submit_all')
+def submit_all(username: str, type: str = None, sensitive: bool = None, is_bot: bool = None, model_judgment: str = None,
+               content_keyword: str = None, topic: str = None,
+               data_db: Session = Depends(get_db(SessionLocalData)),
+               daily_data_db: Session = Depends(get_db(SessionLocalDailyData)),
+               temp_sen_db: Session = Depends(get_db(SessionLocalTempSen)),
+               temp_human_llm_db: Session = Depends(get_db(SessionLocalTempHumanLLM))) -> JSONResponse:
+    try:
+        filters = []
+        filters.append(DailyData.submitted == False)
+        if type:
+            filters.append(DailyData.type == type)
+        if sensitive is not None:
+            filters.append(DailyData.sensitive == sensitive)
+        if is_bot is not None:
+            filters.append(DailyData.is_bot == is_bot)
+        if model_judgment:
+            filters.append(DailyData.model_judgment == model_judgment)
+        if content_keyword:
+            filters.append(DailyData.content.like(f'%{content_keyword}%'))
+        if topic:
+            filters.append(DailyData.topic.like(f'%{topic}%'))
+
+        query = daily_data_db.query(DailyData).filter(*filters)
+        total_count = query.count()
+
+        results = query.all()
+        for record in results:
+            uuid = uuid4().hex
+            temp_sen_db.execute(insert(TempSen).values(type=record.type,
+                                                       time=record.time,
+                                                       push_time=record.push_time,
+                                                       content=record.content,
+                                                       sensitive=record.sensitive,
+                                                       sensitive_score=record.sensitive_score,
+                                                       url=record.url,
+                                                       topic=record.topic,
+                                                       username=username,
+                                                       uuid=uuid))
+
+            temp_human_llm_db.execute(insert(TempHumanLLM).values(type=record.type,
+                                                                  time=record.time,
+                                                                  push_time=record.push_time,
+                                                                  content=record.content,
+                                                                  is_bot=record.is_bot,
+                                                                  is_bot_score=record.is_bot_score,
+                                                                  model_judgment=record.model_judgment,
+                                                                  url=record.url,
+                                                                  topic=record.topic,
+                                                                  username=username,
+                                                                  uuid=uuid
+                                                                  ))
+
+            data_db.execute(insert(Data).values(type=record.type,
+                                                time=record.time,
+                                                push_time=record.time,
+                                                content=record.content,
+                                                sensitive=record.sensitive,
+                                                sensitive_score=record.sensitive_score,
+                                                is_bot=record.is_bot,
+                                                is_bot_score=record.is_bot_score,
+                                                model_judgment=record.model_judgment,
+                                                url=record.url,
+                                                topic=record.topic,
+                                                uuid=uuid
+                                                ))
+
+            record.submitted = True
+
+        daily_data_db.commit()
+        temp_sen_db.commit()
+        temp_human_llm_db.commit()
+        data_db.commit()
+
+        return JSONResponse(content={'message': f'{total_count} Records Submitted'})
 
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
@@ -917,6 +1035,8 @@ def update_sen(ID: str, approve: str, auditor: str,
                 sen_db.commit()
 
                 data_record = data_db.query(Data).filter(Data.uuid == record.uuid).first()
+                if not data_record:
+                    continue
                 data_record.sensitive = record.sensitive
                 data_record.sensitive_score = record.sensitive_score
                 data_db.commit()
@@ -927,6 +1047,9 @@ def update_sen(ID: str, approve: str, auditor: str,
         return JSONResponse(content={'message': 'Updated Successfully'})
 
     except Exception as e:
+        import traceback
+        error = traceback.format_exc()
+        print(error)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
@@ -964,10 +1087,11 @@ def update_human_llm(ID: str, approve: str, auditor: str,
                 human_llm_db.commit()
 
                 data_record = data_db.query(Data).filter(Data.uuid == record.uuid).first()
-                data_record.is_bot = record.is_bot
-                data_record.is_bot_score = record.is_bot_score
-                data_record.model_judgment = record.model_judgment
-                data_db.commit()
+                if data_record is not None:
+                    data_record.is_bot = record.is_bot
+                    data_record.is_bot_score = record.is_bot_score
+                    data_record.model_judgment = record.model_judgment
+                    data_db.commit()
 
             temp_human_llm_db.execute(delete(TempHumanLLM).filter(TempHumanLLM.ID == ID_))
             temp_human_llm_db.commit()
@@ -975,6 +1099,9 @@ def update_human_llm(ID: str, approve: str, auditor: str,
         return JSONResponse(content={'message': 'Updated Successfully'})
 
     except Exception as e:
+        import traceback
+        error = traceback.format_exc()
+        print(error)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
@@ -1036,7 +1163,7 @@ def read_temp_sen(page: int = 1, page_size: int = 10, type: str = None, sensitiv
         for row in results:
             rows.append(
                 {'ID': row.ID, 'type': row.type, 'time': row.time, 'content': row.content, 'sensitive': row.sensitive,
-                 'sensitive_score': row.sensitive_score, 'url': row.url, 'topic': row.topic, 'username': row.username})
+                 'sensitive_score': round(row.sensitive_score, 2), 'url': row.url, 'topic': row.topic, 'username': row.username})
 
         return JSONResponse(content={'total_count': total_count, 'temp_sen': rows})
     except Exception as e:
@@ -1071,7 +1198,7 @@ def read_human_llm(page: int = 1, page_size: int = 10, type: str = None, is_bot:
         rows = []
         for row in results:
             rows.append({'ID': row.ID, 'type': row.type, 'time': row.time, 'content': row.content, 'is_bot': row.is_bot,
-                         'is_bot_score': row.is_bot_score, 'model_judgment': row.model_judgment, 'url': row.url,
+                         'is_bot_score': round(row.is_bot_score, 2), 'model_judgment': row.model_judgment, 'url': row.url,
                          'topic': row.topic, 'username': row.username})
 
         return JSONResponse(content={'total_count': total_count, 'temp_human_llm': rows})

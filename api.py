@@ -807,7 +807,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                 for row in results:
                     row_topics = row.topic.split(' ')
                     for row_topic in row_topics:
-                        today_topic_human_llm[row_topic][row.sensitive] += row[2]
+                        today_topic_human_llm[row_topic][row.is_bot] += row[2]
 
                 response['today_topic_human_llm'] = today_topic_human_llm
 

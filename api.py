@@ -657,7 +657,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
                     data_sensitive[row[0]][row[1]][row[2]] = row[3]
                 response['data_sensitive'] = dict(sorted(data_sensitive.items(), key=lambda item: item[0]))
 
-        if 'today_sen_count' in activate:  # 今日人机判别数据库新增
+        if 'today_sen_count' in activate:  # 今日敏感数据库新增
             response['today_sen_count'] = sen_db.query(Sen.ID).filter(
                 func.strftime('%Y-%m-%d', Sen.submitted_time) == today).count()
 
@@ -814,7 +814,7 @@ def get_cached_paint_data(activate: str, start_date: str = None, end_date: str =
         daily_data_db.close()
 
     if response:
-        set_cache(cache_key, response, expiry_seconds=300)
+        set_cache(cache_key, response, expiry_seconds=30)
 
     return response
 
@@ -863,8 +863,8 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
            temp_human_llm_db: Session = Depends(get_db(SessionLocalTempHumanLLM))) -> JSONResponse:
     try:
         IDs = list(map(int, ID.split('&')))
-        is_sensitive_s = list(map(bool, is_sensitive.split('&')))
-        is_bot_s = list(map(bool, is_bot.split('&')))
+        is_sensitive_s = list(map(int, is_sensitive.split('&')))
+        is_bot_s = list(map(int, is_bot.split('&')))
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
@@ -1019,7 +1019,7 @@ def update_sen(ID: str, approve: str, auditor: str,
                data_db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
     try:
         IDs = list(map(int, ID.split('&')))
-        approves = list(map(bool, approve.split('&')))
+        approves = list(map(int, approve.split('&')))
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
@@ -1070,7 +1070,7 @@ def update_human_llm(ID: str, approve: str, auditor: str,
                      data_db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
     try:
         IDs = list(map(int, ID.split('&')))
-        approves = list(map(bool, approve.split('&')))
+        approves = list(map(int, approve.split('&')))
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:
@@ -1649,7 +1649,7 @@ def clear_cached_items():
 @app.on_event('startup')
 async def startup_event():
     schedular.add_job(clear_expired_reports, IntervalTrigger(minutes=1))
-    schedular.add_job(clear_cached_items, IntervalTrigger(seconds=20))
+    schedular.add_job(clear_cached_items, IntervalTrigger(seconds=10))
     schedular.start()
 
 

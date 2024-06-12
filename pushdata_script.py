@@ -10,15 +10,34 @@ type_list = ['境外新闻', '社交媒体', '消息应用', '问答社区']
 start_date = datetime(2010, 1, 1)
 end_date = datetime(2023, 11, 1)
 
+n = 0
 for file in os.listdir('./database/sample'):
+
     with open(os.path.join('./database/sample', file), 'r', encoding='utf-8') as f:
-        for line in f.readlines()[:200]:
+        for line in f.readlines():
             json_line = json.loads(line)
-            content = json_line['text']
+            if file == 'quora.jsonl':
+                type = '问答社区'
+                content = json_line['text']
+            elif file == 'telegram.jsonl':
+                type = '消息应用'
+                content = json_line['message']
+            elif file == 'twitter.jsonl' or file == 'facebook.jsonl':
+                type = '社交媒体'
+                content = json_line['post_text']
+            else:
+                type = '境外新闻'
+                content = json_line['text']
+
+            if content == '':
+                continue
             params = {
-                'type': '境外新闻',
+                'type': type,
                 'date_time': datetime.strftime(start_date + timedelta(days=random.randint(0, (end_date - start_date).days)), '%Y-%m-%d %H:%M:%S'),
                 'content': content
             }
             requests.post(URL, json=params)
             time.sleep(0.1)
+            n += 1
+            if n == 50:
+                break

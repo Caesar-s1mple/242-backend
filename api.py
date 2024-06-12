@@ -380,7 +380,7 @@ def search_daily_data(page: int = 1, page_size: int = 10, type: str = None, sens
 
         rows = []
         for row in results:
-            rows.append([row.ID, row.type, row.time, row.content, row.sensitive, row.sensitive_score, row.is_bot,
+            rows.append([row.ID, row.type, row.time, row.content, row.sensitive, round(row.sensitive_score, 2), row.is_bot,
                          round(row.is_bot_score, 2), row.model_judgment, row.url, row.topic])
 
         return JSONResponse(content={'total_count': total_count, 'data': rows})

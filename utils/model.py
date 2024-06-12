@@ -3,6 +3,7 @@ from transformers import BertPreTrainedModel, BertModel
 import torch.nn as nn
 from utils.config import labels
 import torch.nn.functional as F
+from transformers import BertConfig
 
 
 class BertClassification(BertPreTrainedModel):
@@ -29,7 +30,7 @@ class BertClassification(BertPreTrainedModel):
 class TextEmbedder(nn.Module):
     def __init__(self, num_classes):
         super(TextEmbedder, self).__init__()
-        self.bert = BertModel.from_pretrained('./bert-large-uncased')
+        self.bert = BertModel(BertConfig.from_pretrained('./bert-large-uncased'))
         self.mlp2 = nn.Linear(1024, num_classes)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None):

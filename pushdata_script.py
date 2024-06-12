@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import requests
 import json
 
-URL = 'http://123.60.2.198:8123/push_data'
+URL = 'http://127.0.0.1:8123/push_data'
 type_list = ['境外新闻', '社交媒体', '消息应用', '问答社区']
 start_date = datetime(2010, 1, 1)
 end_date = datetime(2023, 11, 1)

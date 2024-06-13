@@ -865,6 +865,7 @@ def submit(ID: str, is_sensitive: str, is_bot: str, username: str,
         IDs = list(map(int, ID.split('&')))
         is_sensitive_s = list(map(int, is_sensitive.split('&')))
         is_bot_s = list(map(int, is_bot.split('&')))
+        username = username.split('&')[0]
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': str(e)})
     try:

@@ -15,15 +15,18 @@ for file in os.listdir('./database/sample'):
     with open(os.path.join('./database/sample', file), 'r', encoding='utf-8') as f:
         for line in f.readlines():
             json_line = json.loads(line)
+            url = None
             if file == 'quora.jsonl':
                 type = '问答社区'
                 content = json_line['text']
+                url = json_line['topic_url']
             elif file == 'telegram.jsonl':
                 type = '消息应用'
                 content = json_line['message']
             elif file == 'twitter.jsonl' or file == 'facebook.jsonl':
                 type = '社交媒体'
                 content = json_line['post_text']
+                url = json_line['id']
             else:
                 type = '境外新闻'
                 content = json_line['text']
@@ -33,7 +36,8 @@ for file in os.listdir('./database/sample'):
             params = {
                 'type': type,
                 'date_time': datetime.strftime(start_date + timedelta(days=random.randint(0, (end_date - start_date).days)), '%Y-%m-%d %H:%M:%S'),
-                'content': content
+                'content': content,
+                'url': url
             }
             print(params)
             requests.post(URL, json=params)

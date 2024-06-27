@@ -2,6 +2,13 @@ import torch
 import json
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+device2 = 'npu:6'
+try:
+    import torch_npu
+    device = 'npu:5' if torch_npu.npu.is_available() else device
+except:
+    pass
+
 try:
     a = torch.tensor(1, device=device)
     del a

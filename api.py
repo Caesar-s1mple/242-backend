@@ -1,3 +1,4 @@
+import socket
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -40,14 +41,18 @@ report_data_store = {}
 cached_item_store = {}
 cache_expiry_times = {}
 
-sen_model = BertClassification.from_pretrained('./bert-label-classification').to(device)
-sen_tokenizer = BertTokenizer.from_pretrained('./bert-label-classification')
+socket_host = '127.0.0.1'
+socket_port = 8124
+process_lock = False
+
+# sen_model = BertClassification.from_pretrained('./bert-label-classification').to(device)
+# sen_tokenizer = BertTokenizer.from_pretrained('./bert-label-classification')
 llm_binary_model = TextEmbedder(num_classes=2).to(device)
 llm_binary_model.load_state_dict(torch.load('./checkpoints_llm/checkpoint_epoch_2.pth', map_location=device))
 llm_classifier_model = TextEmbedder(num_classes=14).to(device)
 llm_classifier_model.load_state_dict(torch.load('./checkpoints_llm/checkpoint_epoch_1_14.pth', map_location=device))
 llm_tokenizer = BertTokenizer.from_pretrained('./bert-large-uncased')
-sen_model.eval()
+# sen_model.eval()
 llm_binary_model.eval()
 llm_classifier_model.eval()
 
@@ -179,15 +184,15 @@ def set_cache(key: str, data: dict, expiry_seconds: int):
     cache_expiry_times[key] = datetime.now() + timedelta(seconds=expiry_seconds)
 
 
-def predict_sensitive(content: str, max_length: int = 512) -> (bool, float):
-    input_ids = sen_tokenizer(content, max_length=max_length, truncation=True, return_tensors='pt')['input_ids'].to(
-        device)
-    with torch.no_grad():
-        logits = sen_model(input_ids)[0]
-        score = logits.detach().softmax(dim=0).cpu().numpy().tolist()[0]
-        pred = logits.argmax().item()
-
-    return True if pred == 0 else False, round(score, 5)
+# def predict_sensitive(content: str, max_length: int = 512) -> (bool, float):
+#     input_ids = sen_tokenizer(content, max_length=max_length, truncation=True, return_tensors='pt')['input_ids'].to(
+#         device)
+#     with torch.no_grad():
+#         logits = sen_model(input_ids)[0]
+#         score = logits.detach().softmax(dim=0).cpu().numpy().tolist()[0]
+#         pred = logits.argmax().item()
+#
+#     return True if pred == 0 else False, round(score, 5)
 
 
 def predict_llm(content: str, max_length: int = 512) -> dict:
@@ -221,34 +226,53 @@ def predict_llm(content: str, max_length: int = 512) -> dict:
 
 
 def queue_daily_data(data_id):
+    global process_lock
     daily_data_queue.put(data_id)
-    if daily_data_queue.qsize() == 10:
-        threading.Thread(target=process_daily_data).start()
+    if daily_data_queue.qsize() >= 10 and process_lock is False:
+        try:
+            inference_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            inference_socket.connect((socket_host, socket_port))
+        except:
+            return
+
+        process_lock = True
+        data_ids = []
+        while not daily_data_queue.empty():
+            data_id = daily_data_queue.get()
+            data_ids.append(data_id)
+        if len(data_ids):
+            data = json.dumps(data_ids).encode()
+            try:
+                inference_socket.sendall(data)
+            finally:
+                inference_socket.close()
+                process_lock = False
+        # threading.Thread(target=process_daily_data).start()
 
 
-def process_daily_data():
-    daily_data_db = SessionLocalDailyData()
-    while not daily_data_queue.empty():
-        data_id = daily_data_queue.get()
-        daily_data = daily_data_db.query(DailyData).filter(DailyData.ID == data_id).first()
-        if not daily_data:
-            continue
-        content = daily_data.content
-        is_sensitive, score = predict_sensitive(content)
-        llm_result = predict_llm(content)
-        is_bot_score = llm_result['llm_probability']
-        is_bot = True if is_bot_score > 0.5 else False
-        daily_data.sensitive = is_sensitive
-        daily_data.sensitive_score = score
-        daily_data.is_bot = is_bot
-        daily_data.is_bot_score = is_bot_score
-        if is_bot:
-            daily_data.model_judgment = max(llm_result['llm_class_probability'], key=llm_result['llm_class_probability'].get)
-
-
-        daily_data_db.commit()
-
-    daily_data_db.close()
+# def process_daily_data():
+#     daily_data_db = SessionLocalDailyData()
+#     while not daily_data_queue.empty():
+#         data_id = daily_data_queue.get()
+#         daily_data = daily_data_db.query(DailyData).filter(DailyData.ID == data_id).first()
+#         if not daily_data:
+#             continue
+#         content = daily_data.content
+#         is_sensitive, score = predict_sensitive(content)
+#         llm_result = predict_llm(content)
+#         is_bot_score = llm_result['llm_probability']
+#         is_bot = True if is_bot_score > 0.5 else False
+#         daily_data.sensitive = is_sensitive
+#         daily_data.sensitive_score = score
+#         daily_data.is_bot = is_bot
+#         daily_data.is_bot_score = is_bot_score
+#         if is_bot:
+#             daily_data.model_judgment = max(llm_result['llm_class_probability'],
+#                                             key=llm_result['llm_class_probability'].get)
+#
+#         daily_data_db.commit()
+#
+#     daily_data_db.close()
 
 
 @app.post('/push_data')
@@ -329,17 +353,17 @@ def data_count(db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
 
 
-@app.get('/sensitive')
-def sensitive(content: str) -> JSONResponse:
-    try:
-        is_sensitive, score = predict_sensitive(content)
-        response = {
-            'is_sensitive': is_sensitive,
-            'score': score
-        }
-        return JSONResponse(content=response)
-    except:
-        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': 'Bad Request'})
+# @app.get('/sensitive')
+# def sensitive(content: str) -> JSONResponse:
+#     try:
+#         is_sensitive, score = predict_sensitive(content)
+#         response = {
+#             'is_sensitive': is_sensitive,
+#             'score': score
+#         }
+#         return JSONResponse(content=response)
+#     except:
+#         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': 'Bad Request'})
 
 
 @app.get('/llm_det')
@@ -380,8 +404,9 @@ def search_daily_data(page: int = 1, page_size: int = 10, type: str = None, sens
 
         rows = []
         for row in results:
-            rows.append([row.ID, row.type, row.time, row.content, row.sensitive, round(row.sensitive_score, 2), row.is_bot,
-                         round(row.is_bot_score, 2), row.model_judgment, row.url, row.topic])
+            rows.append(
+                [row.ID, row.type, row.time, row.content, row.sensitive, round(row.sensitive_score, 2), row.is_bot,
+                 round(row.is_bot_score, 2), row.model_judgment, row.url, row.topic])
 
         return JSONResponse(content={'total_count': total_count, 'data': rows})
     except:

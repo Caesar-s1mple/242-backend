@@ -1,19 +1,17 @@
+import json
 from utils.model import BertClassification, TextEmbedder
 from transformers import BertTokenizer
-from utils.table_models import DailyData
-from utils.config import device2
+from utils.config import device
 import torch
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 import socket
-import json
+import threading
 
-device = device2
-
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind(('127.0.0.1', 8124))
-server_socket.listen(5)
-
+socket_host = '127.0.0.1'
+send_socket_port = 8125
+listen_socket_port = 8124
+listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listen_socket.bind((socket_host, listen_socket_port))
+listen_socket.listen(5)
 
 sen_model = BertClassification.from_pretrained('./bert-label-classification').to(device)
 sen_tokenizer = BertTokenizer.from_pretrained('./bert-label-classification')
@@ -29,17 +27,13 @@ llm_classifier_model.eval()
 llm_labels = ["kimi", "通义", "文心一言", "智谱", "ChatGLM3-6B", "QWen1.5-7B", "QWen1.5-14B", "Baichuan2-7B",
               "Baichuan2-13B", "ChatGPT", "Llama2-7B", "Llama2-13B", "Llama3-8B", "Mistral v0.2 7B"]
 
-DATABASE_DAILY_DATA = 'sqlite:///./database/daily_data.db'
-engine_daily_data = create_engine(DATABASE_DAILY_DATA)
-SessionLocalDailyData = sessionmaker(bind=engine_daily_data, autoflush=False, autocommit=False)
-
 
 def predict_sensitive(content: str, max_length: int = 512) -> (bool, float):
     input_ids = sen_tokenizer(content, max_length=max_length, truncation=True, return_tensors='pt')['input_ids'].to(
         device)
     with torch.no_grad():
         logits = sen_model(input_ids)[0]
-        score = logits.detach().softmax(dim=0).cpu().numpy().tolist()[0]
+        score = torch.softmax(logits, dim=0)[0].item()
         pred = logits.argmax().item()
 
     return True if pred == 0 else False, round(score, 5)
@@ -75,35 +69,30 @@ def predict_llm(content: str, max_length: int = 512) -> dict:
         }
 
 
-def process_daily_data(data_ids):
-    daily_data_db = SessionLocalDailyData()
+def process_daily_data(id, content):
+    is_sensitive, score = predict_sensitive(content)
+    llm_result = predict_llm(content)
+    is_bot_score = llm_result['llm_probability']
+    is_bot = True if is_bot_score > 0.5 else False
 
-    for data_id in data_ids:
-        daily_data = daily_data_db.query(DailyData).filter(DailyData.ID == data_id).first()
-        if not daily_data or daily_data.submitted:
-            continue
-        content = daily_data.content
-        is_sensitive, score = predict_sensitive(content)
-        llm_result = predict_llm(content)
-        is_bot_score = llm_result['llm_probability']
-        is_bot = True if is_bot_score > 0.5 else False
-        daily_data.sensitive = is_sensitive
-        daily_data.sensitive_score = score
-        daily_data.is_bot = is_bot
-        daily_data.is_bot_score = is_bot_score
-        if is_bot:
-            daily_data.model_judgment = max(llm_result['llm_class_probability'],
-                                            key=llm_result['llm_class_probability'].get)
+    results = [id, is_sensitive, score, is_bot, is_bot_score]
+    if is_bot:
+        results.append(max(llm_result['llm_class_probability'],
+                           key=llm_result['llm_class_probability'].get))
 
-        daily_data_db.commit()
-
-    daily_data_db.close()
+    try:
+        send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        send_socket.connect((socket_host, send_socket_port))
+        send_socket.sendall(json.dumps(results).encode())
+        send_socket.close()
+    except:
+        return
 
 
 def socket_program():
     print('Listening...')
     while True:
-        conn, address = server_socket.accept()
+        conn, address = listen_socket.accept()
         print(f"Connection from {address} has been established.")
         data = b""
         while True:
@@ -111,12 +100,12 @@ def socket_program():
             if not packet:
                 break
             data += packet
-        if len(data):
-            data_ids = json.loads(data.decode())
-            if data_ids:
-                print(data_ids)
-                process_daily_data(data_ids)
         conn.close()
+        if len(data):
+            id, content = json.loads(data.decode())
+            if content:
+                print(id, content)
+                process_daily_data(id, content)
 
 
 if __name__ == '__main__':

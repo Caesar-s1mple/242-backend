@@ -22,6 +22,12 @@ class DailyData(Base):
     submitted = Column(Boolean, default=False, index=True)
 
 
+class PushedDailyData(Base):
+    __tablename__ = 'data_ids'
+    ID = Column(Integer, primary_key=True, autoincrement=True)
+    data_id = Column(Integer)
+
+
 class Data(Base):
     __tablename__ = 'data'
     ID = Column(Integer, primary_key=True, autoincrement=True)

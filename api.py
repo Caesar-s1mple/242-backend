@@ -1,4 +1,3 @@
-import socket
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -6,25 +5,20 @@ import json
 import logging
 import random
 import time
-import torch
 import uvicorn
-from fastapi import FastAPI, status, BackgroundTasks, Depends, Request, Body
+from fastapi import FastAPI, status, Depends, Request, Body
 from fastapi.responses import JSONResponse, StreamingResponse
-from transformers import BertTokenizer
-from utils.model import BertClassification, TextEmbedder
-from utils.config import device
 from sqlalchemy import create_engine, text, select, insert, delete, func, MetaData, Table, Column, Boolean, Text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
 from datetime import datetime, timedelta
-from queue import Queue
 import jieba.analyse
 from wordcloud import WordCloud, STOPWORDS
 import io
 import base64
 import threading
-from utils.table_models import DailyData, Data, HumanLLM, Sen, TempHumanLLM, TempSen, Users, LLMRank
+from utils.table_models import DailyData, PushedDailyData, Data, HumanLLM, Sen, TempHumanLLM, TempSen, Users, LLMRank
 from urllib.parse import urlencode
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -41,21 +35,6 @@ report_data_store = {}
 cached_item_store = {}
 cache_expiry_times = {}
 
-socket_host = '127.0.0.1'
-socket_port = 8124
-process_lock = False
-
-# sen_model = BertClassification.from_pretrained('./bert-label-classification').to(device)
-# sen_tokenizer = BertTokenizer.from_pretrained('./bert-label-classification')
-llm_binary_model = TextEmbedder(num_classes=2).to(device)
-llm_binary_model.load_state_dict(torch.load('./checkpoints_llm/checkpoint_epoch_2.pth', map_location=device))
-llm_classifier_model = TextEmbedder(num_classes=14).to(device)
-llm_classifier_model.load_state_dict(torch.load('./checkpoints_llm/checkpoint_epoch_1_14.pth', map_location=device))
-llm_tokenizer = BertTokenizer.from_pretrained('./bert-large-uncased')
-# sen_model.eval()
-llm_binary_model.eval()
-llm_classifier_model.eval()
-
 llm_labels = ["kimi", "通义", "文心一言", "智谱", "ChatGLM3-6B", "QWen1.5-7B", "QWen1.5-14B", "Baichuan2-7B",
               "Baichuan2-13B", "ChatGPT", "Llama2-7B", "Llama2-13B", "Llama3-8B", "Mistral v0.2 7B"]
 type_list = ['境外新闻', '社交媒体', '消息应用', '问答社区']
@@ -69,7 +48,6 @@ with open('./utils/stopwords.txt', 'r', encoding='utf-8') as f:
 with open('./utils/topic_mapping.json', 'r', encoding='utf-8') as f:
     topic_mapping_dict = json.load(f)
 
-daily_data_queue = Queue()
 
 DATABASE_DATA = 'sqlite:///./database/data.db'
 DATABASE_DAILY_DATA = 'sqlite:///./database/daily_data.db'
@@ -144,6 +122,7 @@ def add_column_if_not_exists(engine, table_name, column, default=None):
 def init_db():
     Data.__table__.create(engine_data, checkfirst=True)
     DailyData.__table__.create(engine_daily_data, checkfirst=True)
+    PushedDailyData.__table__.create(engine_daily_data, checkfirst=True)
     Sen.__table__.create(engine_sen, checkfirst=True)
     HumanLLM.__table__.create(engine_human_llm, checkfirst=True)
     Users.__table__.create(engine_users, checkfirst=True)
@@ -184,99 +163,8 @@ def set_cache(key: str, data: dict, expiry_seconds: int):
     cache_expiry_times[key] = datetime.now() + timedelta(seconds=expiry_seconds)
 
 
-# def predict_sensitive(content: str, max_length: int = 512) -> (bool, float):
-#     input_ids = sen_tokenizer(content, max_length=max_length, truncation=True, return_tensors='pt')['input_ids'].to(
-#         device)
-#     with torch.no_grad():
-#         logits = sen_model(input_ids)[0]
-#         score = logits.detach().softmax(dim=0).cpu().numpy().tolist()[0]
-#         pred = logits.argmax().item()
-#
-#     return True if pred == 0 else False, round(score, 5)
-
-
-def predict_llm(content: str, max_length: int = 512) -> dict:
-    input_ids = llm_tokenizer(content, max_length=max_length, truncation=True, return_tensors='pt')['input_ids'].to(
-        device)
-    with torch.no_grad():
-        logits = llm_binary_model(input_ids)
-        probs = torch.softmax(logits / 10, dim=1)
-        generated_prob = probs[0][1].item()
-
-    if generated_prob > 0.5:
-        with torch.no_grad():
-            logits = llm_classifier_model(input_ids)
-            weights = torch.tensor(
-                [0.046, 0.046, 0.046, 0.046, 0.046, 0.046, 0.046, 0.046, 0.046, 0.4, 0.046, 0.046, 0.046, 0.046],
-                device=device)
-            weighted_logits = logits * weights
-            probs = torch.softmax(weighted_logits, dim=1)[0]
-
-        llm_probabilities = dict(zip(llm_labels, probs.tolist()))
-
-        return {
-            'llm_probability': generated_prob,
-            'llm_class_probability': llm_probabilities
-        }
-    else:
-        return {
-            'llm_probability': generated_prob,
-            'message': 'Not Generated by LLM'
-        }
-
-
-def queue_daily_data(data_id):
-    global process_lock
-    daily_data_queue.put(data_id)
-    if daily_data_queue.qsize() >= 10 and process_lock is False:
-        try:
-            inference_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            inference_socket.connect((socket_host, socket_port))
-        except:
-            return
-
-        process_lock = True
-        data_ids = []
-        while not daily_data_queue.empty():
-            data_id = daily_data_queue.get()
-            data_ids.append(data_id)
-        if len(data_ids):
-            data = json.dumps(data_ids).encode()
-            try:
-                inference_socket.sendall(data)
-            finally:
-                inference_socket.close()
-                process_lock = False
-        # threading.Thread(target=process_daily_data).start()
-
-
-# def process_daily_data():
-#     daily_data_db = SessionLocalDailyData()
-#     while not daily_data_queue.empty():
-#         data_id = daily_data_queue.get()
-#         daily_data = daily_data_db.query(DailyData).filter(DailyData.ID == data_id).first()
-#         if not daily_data:
-#             continue
-#         content = daily_data.content
-#         is_sensitive, score = predict_sensitive(content)
-#         llm_result = predict_llm(content)
-#         is_bot_score = llm_result['llm_probability']
-#         is_bot = True if is_bot_score > 0.5 else False
-#         daily_data.sensitive = is_sensitive
-#         daily_data.sensitive_score = score
-#         daily_data.is_bot = is_bot
-#         daily_data.is_bot_score = is_bot_score
-#         if is_bot:
-#             daily_data.model_judgment = max(llm_result['llm_class_probability'],
-#                                             key=llm_result['llm_class_probability'].get)
-#
-#         daily_data_db.commit()
-#
-#     daily_data_db.close()
-
-
 @app.post('/push_data')
-def push_data(background_tasks: BackgroundTasks, type: str = Body(...), date_time: str = Body(...),
+def push_data(type: str = Body(...), date_time: str = Body(...),
               content: str = Body(...), url: str = Body(None),
               daily_data_db: Session = Depends(get_db(SessionLocalDailyData))) -> JSONResponse:
     if type not in type_list:
@@ -290,9 +178,8 @@ def push_data(background_tasks: BackgroundTasks, type: str = Body(...), date_tim
                                      sensitive=False, sensitive_score=0., is_bot=False, is_bot_score=0.,
                                      model_judgment=None, url=url, topic=' '.join(topic) if len(topic) else None))
         data_id = result.lastrowid
+        daily_data_db.execute(insert(PushedDailyData).values(data_id=data_id))
         daily_data_db.commit()
-
-        background_tasks.add_task(queue_daily_data, data_id)
 
         row_count = daily_data_db.query(DailyData.ID).count()
 
@@ -366,13 +253,13 @@ def data_count(db: Session = Depends(get_db(SessionLocalData))) -> JSONResponse:
 #         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': 'Bad Request'})
 
 
-@app.get('/llm_det')
-def llm_det(content: str) -> JSONResponse:
-    try:
-        response = predict_llm(content)
-        return JSONResponse(content=response)
-    except:
-        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': 'Bad Request'})
+# @app.get('/llm_det')
+# def llm_det(content: str) -> JSONResponse:
+#     try:
+#         response = predict_llm(content)
+#         return JSONResponse(content=response)
+#     except:
+#         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={'message': 'Bad Request'})
 
 
 @app.get('/search/daily_data')
@@ -1617,27 +1504,6 @@ def generate_report(report_id: str):
                                  headers={"Content-Disposition": f"attachment;filename={report_id}.docx"})
     except Exception as e:
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={'message': str(e)})
-
-
-def predict_llm_rank(text_list):
-    model_count = {}
-    for model in llm_labels:
-        model_count[model] = 0.
-
-    for text in text_list:
-        llm_result = predict_llm(text)
-        is_bot = llm_result['llm_probability'] > 0.5
-        if is_bot:
-            llm_class_probability = llm_result['llm_class_probability']
-            pred_model = max(llm_class_probability, key=llm_class_probability.get)
-            model_count[pred_model] += 1.
-
-    present_list = []
-    for model in model_count:
-        model_count[model] = model_count[model] / len(text_list) * 100
-    for model in llm_labels:
-        present_list.append(model_count[model])
-    return present_list
 
 
 @app.middleware('http')

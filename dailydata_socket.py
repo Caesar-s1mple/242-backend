@@ -1,7 +1,6 @@
 import socket
 import json
 import time
-
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import sessionmaker
 from utils.table_models import DailyData, PushedDailyData
@@ -40,14 +39,14 @@ def send_func():
             try:
                 inference_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 inference_socket.connect((socket_host, send_socket_port))
-                inference_socket.sendall(json.dumps(data).encode())
+                inference_socket.sendall(json.dumps(data).encode(encoding='utf-8'))
                 inference_socket.close()
                 daily_data_db.execute(delete(PushedDailyData).filter(PushedDailyData.data_id == id))
                 daily_data_db.commit()
             except:
                 print('Failed sending')
 
-    daily_data_db.close()
+    # daily_data_db.close()
 
 
 def listen_func():
@@ -64,9 +63,9 @@ def listen_func():
             data += packet
         conn.close()
         if len(data):
-            results = json.loads(data.decode())
+            results = json.loads(data.decode(encoding='utf-8'))
             if results:
-                print(results)
+                # print(results)
                 daily_data = daily_data_db.query(DailyData).filter(DailyData.ID == results[0]).first()
                 daily_data.is_sensitive = results[1]
                 daily_data.sensitive_score = results[2]

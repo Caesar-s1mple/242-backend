@@ -1545,11 +1545,6 @@ async def startup_event():
     schedular.start()
 
 
-@app.get('/test1')
-def test1():
-    return JSONResponse(content='yes!')
-
-
 if __name__ == '__main__':
     init_db()
     uvicorn.run(app, host='0.0.0.0', port=8123, log_level='debug')

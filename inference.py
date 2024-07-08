@@ -83,7 +83,7 @@ def process_daily_data(id, content):
     try:
         send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         send_socket.connect((socket_host, send_socket_port))
-        send_socket.sendall(json.dumps(results).encode())
+        send_socket.sendall(json.dumps(results).encode(encoding='utf-8'))
         send_socket.close()
     except:
         return
@@ -102,9 +102,8 @@ def socket_program():
             data += packet
         conn.close()
         if len(data):
-            id, content = json.loads(data.decode())
+            id, content = json.loads(data.decode(encoding='utf-8'))
             if content:
-                print(id, content)
                 process_daily_data(id, content)
 
 

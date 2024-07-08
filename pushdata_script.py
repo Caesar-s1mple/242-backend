@@ -4,13 +4,14 @@ import time
 from datetime import datetime, timedelta
 import requests
 import json
+from tqdm import tqdm
 
 URL = 'http://127.0.0.1:8123/push_data'
 type_list = ['境外新闻', '社交媒体', '消息应用', '问答社区']
 start_date = datetime(2010, 1, 1)
 end_date = datetime(2023, 11, 1)
 
-for file in os.listdir('./database/sample'):
+for file in tqdm(os.listdir('./database/sample')):
     n = 0
     with open(os.path.join('./database/sample', file), 'r', encoding='utf-8') as f:
         for line in f.readlines():
@@ -39,9 +40,10 @@ for file in os.listdir('./database/sample'):
                 'content': content,
                 'url': url
             }
-            print(params)
+            # print(params)
             requests.post(URL, json=params)
             # time.sleep(0.1)
             n += 1
             if n == 50:
                 break
+print('finished')
